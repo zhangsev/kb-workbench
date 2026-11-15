@@ -1,0 +1,174 @@
+import asyncio
+import json
+import os
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
+
+from kbw import examples
+from kbw.code import parse_explore
+from kbw.config import load_config
+from kbw.gateway import Gateway
+from kbw.util import extract_symbols, fts_tokens, rrf
+
+ROOT = Path(__file__).resolve().parent.parent
+STUB = str(Path(__file__).with_name("stub_codegraph.py"))
+
+
+@pytest.fixture()
+def project(tmp_path):
+    """Demo repos + demo knowledge. LLMWiki disabled; CodeGraph absent unless `stub`."""
+    cfg_path = tmp_path / "kbw.yaml"
+    examples.create(tmp_path, cfg_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["downstream"] = {"llmwiki": {"enabled": False},
+                         "codegraph": {"command": "kbw-codegraph-not-installed"}}
+    raw["timeouts"] = {"idle_seconds": 0}
+    cfg_path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    return tmp_path
+
+
+def use_stub(project):
+    cfg_path = project / "kbw.yaml"
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["downstream"]["codegraph"] = {"command": sys.executable, "args": [STUB]}
+    cfg_path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    for name in ("order-service", "inventory-service"):
+        d = project / "examples" / "repos" / name / ".codegraph"
+        d.mkdir()
+        (d / "codegraph.db").write_bytes(b"stub")
+        (d / ".gitignore").write_text("*\n")
+
+
+def test_units():
+    assert "超时" in fts_tokens("订单超时取消") and "order" in fts_tokens("OrderService")
+    kinds = {s["text"]: s["kind"] for s in extract_symbols(
+        "OrderService.cancelOrder 调 /api/inventory/release 发 order.cancelled 配置 order.timeout-minutes")}
+    assert kinds["OrderService"] == "class" and kinds["/api/inventory/release"] == "path"
+    assert "order.cancelled" in kinds and "cancelOrder" in kinds
+    fused = rrf({"a": ["x", "y"], "b": ["y", "z"]})
+    assert fused[0][0] == "y" and fused[0][2] == {"a": 2, "b": 1}
+    secs = parse_explore("Found 1\n\n**`src/A.java`** — A(class)\n\n3\tclass A {\n4\t}\n\n**Not shown above — x**\n- B")
+    assert secs == [{"path": "src/A.java", "symbols": "A(class)", "body": ["", "3\tclass A {", "4\t}", ""],
+                     "start": 3, "end": 4}]
+
+
+def test_end_to_end_over_mcp_degraded(project):
+    """Real MCP client -> real `python -m kbw serve` process. No downstream, no models:
+    everything must still answer, and say exactly what is degraded."""
+    outside = project / "secret.txt"
+    outside.write_text("top secret")
+    link = project / "examples" / "kb" / ".wiki" / "raw" / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        link = None
+
+    async def go():
+        env = dict(os.environ, KBW_CONFIG=str(project / "kbw.yaml"), PYTHONPATH=str(ROOT))
+        params = StdioServerParameters(command=sys.executable, args=["-m", "kbw", "serve"], env=env)
+        async with stdio_client(params) as (r, w):
+            async with ClientSession(r, w) as s:
+                await s.initialize()
+                names = sorted(t.name for t in (await s.list_tools()).tools)
+                assert names == ["read_page", "read_source", "search_all", "search_code", "search_knowledge",
+                                 "service_status"]
+
+                async def call(tool, **args):
+                    res = await s.call_tool(tool, args)
+                    return json.loads(res.content[0].text)
+
+                kn = await call("search_knowledge", query="订单超时取消的规则")
+                top = kn["results"][0]
+                assert top["page"] == "concepts/order-timeout-cancel.md" and top["lines"][0]
+                assert any(d.startswith("semantic") for d in kn["degraded"])
+                assert any(d.startswith("wiki_query") for d in kn["degraded"])
+                src = top["provenance"]["sources"][0]
+                assert src == {"via": "sources/order-timeout-design-summary.md",
+                               "source_path": "raw/order-timeout-design.md"}
+                assert top["provenance"]["updated"] == "2026-05-21"
+
+                page = await call("read_page", path=top["page"])
+                assert "order.timeout-minutes" in page["content"] and page["served_by"] == "local_file"
+                raw = await call("read_source", path=src["source_path"])
+                assert "30 分钟未支付" in raw["content"]
+
+                # provenance that does not exist is reported, not invented
+                inv = (await call("read_page", path="entities/inventory-service.md"))["provenance"]
+                assert inv["sources"] == [] and inv["updated"] is None
+                assert "page declares no sources" in inv["missing"]
+
+                for bad in ("../wiki/index.md", "../../../secret.txt", str(outside)):
+                    assert (await call("read_source", path=bad))["error"] in ("PermissionError", "FileNotFoundError")
+                if link is not None:
+                    assert (await call("read_source", path="link.txt"))["error"] == "PermissionError"
+                assert (await call("read_page", path="../raw/order-timeout-design.md"))["error"] == "PermissionError"
+
+                code = await call("search_code", query="OrderService cancelOrder 在哪里")
+                hit = next(r for r in code["results"] if r["path"].endswith("OrderService.java"))
+                assert hit["repo"] == "order-service" and len(hit["commit"]) == 40
+                assert hit["index_freshness"] == "not_indexed" and hit["exact_hits"][0]["line"] > 0
+                assert any("no CodeGraph index" in d for d in code["degraded"])
+                assert any("exact text search only" in d for d in code["degraded"])
+
+                st = await call("service_status")
+                assert st["downstream"]["llmwiki"]["state"] == "unavailable"
+                assert st["models"]["embedding"]["state"] in ("unavailable", "not_loaded")
+                both = await call("search_all", query="库存预占泄漏 releaseStock")
+                assert {r["kind"] for r in both["results"]} == {"knowledge", "code"}
+    asyncio.run(go())
+
+
+def test_routing_expansion_cross_service_cache(project):
+    use_stub(project)
+
+    async def go():
+        gw = Gateway(load_config(str(project / "kbw.yaml")))
+        try:
+            # concurrent first calls start exactly one downstream process
+            many = await asyncio.gather(*[gw.search_code(f"StockService reserve {i}") for i in range(8)])
+            assert gw.codegraph.stats.starts == 1 and all(m["results"] for m in many)
+
+            r = await gw.search_code("库存 StockService release 怎么实现")
+            assert r["routing"][0]["repo"] == "inventory-service" and not r["degraded"]
+            top = next(x for x in r["results"][:2] if x["path"].endswith("StockService.java"))
+            assert top["repo"] == "inventory-service"
+            assert top["lines"][0] == 1 and len(top["commit"]) == 40 and top["index_freshness"] == "unknown"
+            assert {"codegraph:inventory-service", "ripgrep:inventory-service"} <= set(top["route_ranks"])
+
+            # primary candidate lacks the symbol -> parallel expansion finds it elsewhere
+            r = await gw.search_code("订单 下单 OrderCancelledListener")
+            assert r["repos_queried"][0]["repo"] == "order-service" and r["expanded"]
+            assert any(x["path"].endswith("OrderCancelledListener.java") for x in r["results"])
+
+            # cross-service: related repo is queried even though the primary has results
+            r = await gw.search_code("OrderService cancelOrder InventoryClient OrderStatus 之后下游怎么处理")
+            assert r["cross_service"] and [q["repo"] for q in r["repos_queried"]] == ["order-service", "inventory-service"]
+            assert "cross-service" in r["repos_queried"][1]["reason"]
+
+            # exact cache: hit on repeat, miss after the source changes
+            q = "InventoryClient releaseStock"
+            assert (await gw.search_code(q))["cache"]["hit"] is False
+            assert (await gw.search_code(q))["cache"]["hit"] is True
+            f = project / "examples/repos/order-service/src/main/java/com/example/order/InventoryClient.java"
+            f.write_text(f.read_text(encoding="utf-8") + "// changed\n", encoding="utf-8")
+            again = await gw.search_code(q)
+            assert again["cache"]["hit"] is False
+            assert again["repo_states"]["order-service"]["dirty"] is True
+
+            # knowledge cache invalidates when a page changes; degraded answers are never cached
+            k1 = await gw.search_knowledge("库存预占泄漏")
+            assert k1["degraded"] and (await gw.search_knowledge("库存预占泄漏"))["cache"]["hit"] is False
+
+            # downstream killed -> next query reconnects
+            first = gw.codegraph.stats.starts
+            async with gw.codegraph._lock:
+                await gw.codegraph._teardown()
+            assert (await gw.search_code("StockService 重连"))["results"] and gw.codegraph.stats.starts == first + 1
+        finally:
+            await gw.close()
+    asyncio.run(go())

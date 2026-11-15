@@ -1,0 +1,55 @@
+# kb-workbench configuration. Copy to kbw.yaml and edit.
+# Relative paths are resolved against the directory of this file.
+# On Windows write paths with forward slashes or single quotes: 'D:\code\order-service'
+
+data_dir: .kbw          # gateway database, cache and run files
+offline: false          # true: never use the network (setup installs from vendor/ only)
+
+knowledge:
+  # The LLM Wiki root: a ".wiki" directory containing wiki/ (pages) and raw/ (source material).
+  wiki_root: D:/knowledge/.wiki
+  # read_source may read ONLY inside these directories.
+  source_dirs:
+    - D:/knowledge/.wiki/raw
+
+models:
+  dir: models                         # FastEmbed model cache; copy this directory for offline use
+  embedding: BAAI/bge-small-zh-v1.5
+  reranker: BAAI/bge-reranker-base
+  rerank_enabled: false               # true loads the reranker (more memory, better ordering)
+
+repos:
+  - name: order-service               # unique name, used in results and in depends_on
+    path: D:/code/order-service       # absolute path of the checkout
+    package_prefixes: [com.example.order]
+    keywords: [订单, 下单, order]      # words in a question that point to this service
+    depends_on: [inventory-service]   # services it calls; queried for cross-service questions
+    topics: [order.created, order.cancelled]   # message topics it publishes or consumes
+  - name: inventory-service
+    path: D:/code/inventory-service
+    package_prefixes: [com.example.inventory]
+    keywords: [库存, 预占, inventory, stock]
+    depends_on: []
+    topics: [order.cancelled]
+
+search:
+  min_results: 3        # fewer file sections than this from the first repo => expand to more repos
+  expand_top_n: 3       # how many candidate repos to query in parallel when expanding
+  top_k: 8
+  rrf_k: 60
+
+timeouts:
+  call_seconds: 30      # per downstream call
+  start_seconds: 30     # downstream start + MCP initialize
+  idle_seconds: 300     # release an unused downstream connection after this long (0 = never)
+
+# Optional overrides. By default the programs installed by `kbw setup` under vendor/node are used.
+# downstream:
+#   llmwiki:
+#     enabled: true
+#     command: node
+#     args: ['D:/tools/llmwiki-core/dist/mcp/bin.js']   # the wiki root is appended automatically
+#   codegraph:
+#     enabled: true
+#     command: codegraph
+#     args: [serve, --mcp]  # telemetry disabled through downstream_env

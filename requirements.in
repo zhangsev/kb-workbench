@@ -1,0 +1,7 @@
+# Top-level dependencies. `kbw setup` installs these and writes requirements.lock
+# (full pinned set). Commit requirements.lock once it has been generated and verified.
+mcp==2.3.0          # verified: the gateway and its tests run on this version (2.x API: MCPServer)
+PyYAML>=6.0,<7
+fastembed           # version to be pinned in requirements.lock on first setup
+sqlite-vec          # version to be pinned in requirements.lock on first setup
+pytest              # tests only

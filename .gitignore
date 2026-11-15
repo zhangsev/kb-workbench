@@ -1,0 +1,14 @@
+.venv/
+.kbw/
+__pycache__/
+.pytest_cache/
+models/
+vendor/
+examples/
+kbw.yaml
+.cache/
+.tmp/
+.runtime-home/
+docs/windows-logs/
+Microsoft/Windows/PowerShell/ModuleAnalysisCache
+Microsoft/Windows/PowerShell/ModuleAnalysisCache

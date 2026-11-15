@@ -1,0 +1,43 @@
+{
+  "note": "Upstream versions this gateway was written against. Source was read at these commits on 2026-11-14.",
+  "llmwiki": {
+    "repo": "https://github.com/microsoft/llmwiki",
+    "commit": "32da49bf97743431a8cb3ff46e0e31c7fc629b18",
+    "npm_package": "@llmwiki/core",
+    "version": "0.1.2",
+    "installation": "git source build (npm package unavailable: E404)",
+    "source_dir": "vendor/src/llmwiki",
+    "build_commands": ["npm ci --cache vendor/npm-cache", "npm run build --workspace=packages/core"],
+    "build_cwd": "vendor/src/llmwiki (npm cache argument is resolved to project-absolute path by setup)",
+    "license": "MIT",
+    "node": ">=20",
+    "launcher": "node vendor/src/llmwiki/packages/core/dist/mcp/bin.js <wiki-root>",
+    "tools_used": ["wiki_query", "wiki_read_page"],
+    "tools_allowed": ["wiki_status", "wiki_query", "wiki_list_pages", "wiki_list_sources", "wiki_read_page", "wiki_read_index"]
+  },
+  "codegraph": {
+    "repo": "https://github.com/colbymchenry/codegraph",
+    "commit": "f72c9d2efb14454ff4f9fd7b8460abd82f19a287",
+    "npm_package": "@colbymchenry/codegraph",
+    "version": "1.6.2",
+    "license": "MIT",
+    "node": ">=20 <25",
+    "launcher": "node node_modules/@colbymchenry/codegraph/npm-shim.js serve --mcp",
+    "tools_used": ["codegraph_explore"]
+  },
+  "ripgrep": {
+    "repo": "https://github.com/BurntSushi/ripgrep",
+    "version": "14.1.1",
+    "installation": "Python stdlib download, official .sha256 verification, executable-only extraction",
+    "windows_x64": "ripgrep-14.1.1-x86_64-pc-windows-msvc.zip",
+    "linux_x64": "ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz",
+    "windows_archive_sha256": "d0f534024c42afd6cb4d38907c25cd2b249b79bbe6cc1dbee8e3e37c2b6e25a1",
+    "destination": "vendor/bin/rg.exe (Windows), vendor/bin/rg (Linux)"
+  },
+  "models": {
+    "embedding": "BAAI/bge-small-zh-v1.5",
+    "reranker": "BAAI/bge-reranker-base",
+    "revision": "Qdrant/bge-small-zh-v1.5@46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59 (downloaded snapshot; FastEmbed setup still resolves main)",
+    "reranker_verification": "supported by FastEmbed 0.9.1; disabled in example config, weights not downloaded"
+  }
+}
