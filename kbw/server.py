@@ -64,10 +64,16 @@ def build_server(cfg: Config) -> MCPServer:
 
     @server.tool()
     async def search_code(query: str, repos: list[str] | None = None, top_k: int = 8) -> str:
-        """Search indexed source repositories. Put class names, method names, API paths,
-        topics or config keys in the query. Routes to the most likely repository, expands to
-        other candidates when results are thin, and queries related services for cross-service
-        questions. Returns repo, commit, relative path, line range, index freshness."""
+        """Search configured source repositories (indexed or not).
+        Put identifiers in the query whenever you know them: class or method names, API paths,
+        topics, config keys, file names, or an exact phrase from the code or its comments
+        (Chinese phrases work). Exact text and file-name search covers every routed repository;
+        call-graph results come only from indexed ones. If nothing in the query matches any
+        repository, the result is empty with no_routing_signal=true and a hint, rather than
+        unrelated code. For a single known repository and a known identifier, a plain grep in
+        that repository is just as good; this tool is for finding which repository and for
+        cross-repository questions. Returns repo, commit, relative path, line range with
+        context, index freshness."""
         return await guarded(holder["gw"].search_code(query, repos, top_k))
 
     @server.tool()

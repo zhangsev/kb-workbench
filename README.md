@@ -30,9 +30,10 @@ LLMWiki 不从 npm 安装（包返回 E404）。setup 将仓库克隆到 `vendor
 | 命令 | 作用 | 是否联网 |
 |---|---|---|
 | `setup` | 安装 Python 依赖、源码构建 LLMWiki core、安装 CodeGraph 和本地 ripgrep、下载模型；`--examples` 生成示例；`--pack-offline` 额外下载离线 wheel | 只有它联网；`--offline` 时完全不联网 |
-| `index` | 未索引的仓库执行 `codegraph init <路径> --yes`，已索引的执行 `codegraph sync`；`--rebuild` 全量重建；同时更新知识索引 | 否 |
+| `index` | 未索引的仓库执行 `codegraph init <路径> --yes`，已索引的执行 `codegraph sync`；`--rebuild` 全量重建；同时更新知识索引。`--repo 名称`（可重复）只索引指定仓库，此时跳过知识索引 | 否 |
 | `serve` | 以 stdio 方式运行 MCP 网关。日志全部写 stderr，stdout 只有 MCP 协议 | 否 |
-| `status` | 配置、知识索引、各仓库索引与新鲜度、模型、正在运行的网关进程；`--json` 输出完整信息 | 否 |
+| `status` | 配置、知识索引、代码索引覆盖率（已索引 X/Y 个仓库）、各仓库索引与新鲜度、模型、正在运行的网关进程；`--json` 输出完整信息 | 否 |
+| `query code\|knowledge\|all "问题"` | 在终端直接跑一次检索，打印提取的检索词、路由得分、实际查询的仓库和结果；`--repos a,b` 限定仓库，`--json` 输出完整结果。和 MCP 工具走同一段代码，用来排查"为什么搜不到" | 否 |
 | `stop` | 停止由本配置启动的网关进程（核对命令行后才终止，不动 CodeGraph 自己的共享 daemon） | 否 |
 | `doctor` | 检查运行时、上游程序、仓库索引、模型、数据库；失败项附修复命令 | 否 |
 
@@ -91,7 +92,7 @@ Linux 下 `command` 为 `/opt/kb-workbench/.venv/bin/python`，`KBW_CONFIG` 为 
 | `search_knowledge(query, top_k)` | 全文 + 语义 + `wiki_query` 三路召回，按页面做 RRF 融合，可选重排 |
 | `read_page(path)` | 读取知识页面（走 `wiki_read_page`，下游不可用时改读本地文件并标明） |
 | `read_source(path, start_line, max_lines)` | 读取原始材料，只能读 `source_dirs` 内的文件 |
-| `search_code(query, repos, top_k)` | 路由到候选仓库，查 CodeGraph，ripgrep 精确兜底，必要时扩查 |
+| `search_code(query, repos, top_k)` | 路由到候选仓库，查 CodeGraph，同时做内容和文件名的精确搜索，必要时扩查。没有任何仓库匹配时返回空结果和 `no_routing_signal` |
 | `search_all(query, top_k)` | 知识与代码一起查，两个排名再做一次 RRF |
 | `service_status()` | 下游连接、各仓库索引状态、模型、缓存、降级原因 |
 
@@ -103,12 +104,14 @@ Linux 下 `command` 为 `/opt/kb-workbench/.venv/bin/python`，`KBW_CONFIG` 为 
 
 **代码**：
 
-1. 从问题里提取类名、方法名、接口路径、点分名称（包名、Topic、配置项）、常量名。
-2. 给每个仓库打分：仓库名或包名前缀命中 +3，关键词或 Topic 命中 +2，ripgrep 确认该仓库确实含有某个符号每个 +2。
-3. 先查第一名。结果不足（文件段数少于 `min_results`，或结果中不含任何已提取的符号）时，并行扩查前 `expand_top_n` 个候选。
-4. 跨服务：两个以上仓库有路由得分，或问题含"下游、调用链、消费"等词时，主动查询 `depends_on`、被依赖方和共享 Topic 的仓库，不因第一仓库有结果而停止。
-5. 所有涉及的仓库再用 ripgrep 做固定字符串精确搜索，作为独立一路参与 RRF。
-6. 仓库未建索引或 CodeGraph 不可用时，只返回 ripgrep 结果并标明降级。
+1. 从问题里提取检索词：类名、方法名、接口路径、点分名称（包名、Topic、配置项）、常量名、短横线名称；以及中文词组和普通英文单词。中文按"的、怎么、哪里、什么"等虚词切分，丢弃"实现、接口、代码"这类泛词。
+2. 给每个仓库打分：仓库名或包名前缀命中 +3，`keywords` 或 Topic 命中 +2，文件内容里确实含有某个检索词每个 +2，文件名或路径里含有某个检索词每个 +2。这一步用 ripgrep，不依赖索引，所以没建索引的仓库同样参与。
+3. 某个中文词组在所有仓库里都搜不到时（通常是带了多余的字，例如"子阵概览页面"），把它拆成二字片段再搜一次，片段每个只计 +1。返回里的 `term_mode` 会标明用的是整词还是片段。
+4. **没有任何仓库得分时不猜仓库**：返回空结果、`no_routing_signal: true` 和改写建议，不启动下游。调用方显式传了 `repos` 时才按指定仓库查询。
+5. 先查第一名。结果不足（文件段数少于 `min_results`，或结果中不含任何检索词）时，并行扩查得分靠前的 `expand_top_n` 个候选。
+6. 跨服务：两个以上仓库有路由得分，或问题含"下游、调用链、消费"等词时，主动查询 `depends_on`、被依赖方和共享 Topic 的仓库，不因第一仓库有结果而停止。
+7. 所有涉及的仓库（最多 8 个）做两路精确搜索，各自作为独立排名参与 RRF：文件内容（不区分大小写的固定字符串，命中行附带前后 3 行）和文件名。只在文件名上命中的文件返回开头 25 行。
+8. 仓库未建索引或 CodeGraph 不可用时，只返回精确搜索结果并标明降级（没有调用关系）。
 
 **不会做的事**：没有模型时不生成任何"假向量"，语义这一路直接缺席并在 `degraded` 中说明。
 
@@ -184,3 +187,17 @@ python -m pytest tests -q
 - 只启用了 CodeGraph 默认的 `codegraph_explore` 一个工具，没有单独调用 callers / impact 等工具。
 - 路由打分和"跨服务"判断是规则，不是模型；`depends_on` 和 `topics` 填得越准，跨服务扩查越准。
 - 模型修订号尚未固定，首次 setup 后需要记录到 `upstream.lock.json`。
+- 代码检索没有语义理解：纯自然语言、且用词在代码和注释里都不出现的问题搜不到，会返回空结果。中文切分是规则，不是分词器。
+- 每次查询会对所有已配置的仓库各跑一次 ripgrep 和一次 git 状态检查（8 路并行）。仓库很多或很大时的耗时没有实测数据，可用 `kbw query code "..."` 看实际耗时。
+
+## 14. 什么时候用它，什么时候直接 grep
+
+| 场景 | 建议 |
+|---|---|
+| 已知仓库、已知类名或注释原文 | 直接在该仓库里 grep，更快 |
+| 不知道在哪个仓库 | `search_code`，会对所有已配置仓库做内容和文件名匹配 |
+| 需要调用关系、跨服务链路 | `search_code`，且相关仓库要先建索引、填好 `depends_on` 和 `topics` |
+| 回忆以前分析过什么 | `search_knowledge` |
+| 判断索引是否过期、覆盖了多少仓库 | `service_status` 或 `kbw status` |
+
+中文业务词（例如"子阵"）建议同时写进对应仓库的 `keywords`，路由会更稳。

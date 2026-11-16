@@ -168,7 +168,13 @@ def cmd_index(args) -> int:
         if resolved:
             version = (run([*resolved[0:1], *resolved[1], "version"], env=downstream_env()).stdout.strip()
                        .splitlines() or [None])[-1]
-        for repo in cfg.repos if not args.knowledge_only else []:
+        wanted = list(args.repo or [])
+        unknown = [w for w in wanted if not cfg.repo(w)]
+        if unknown:
+            print(f"unknown repos: {unknown}; configured: {[r.name for r in cfg.repos]}")
+            return 2
+        targets = [r for r in cfg.repos if not wanted or r.name in wanted]
+        for repo in targets if not args.knowledge_only else []:
             print(f"\n[code] {repo.name}  {repo.path}")
             if not repo.path.is_dir():
                 print("  path does not exist; skipped"); rc = 1; continue
@@ -184,10 +190,10 @@ def cmd_index(args) -> int:
             code = _stream([resolved[0], *resolved[1], *sub], env=downstream_env())
             print(f"  exit {code}, {time.perf_counter() - t0:.1f}s")
             if code == 0:
-                gw.store.set_repo_index(repo.name, gw.code.repo_state(repo)["commit"], version)
+                gw.store.set_repo_index(repo.name, gw.code.repo_state(repo, True)["commit"], version)
             else:
                 rc = 1
-        if not args.code_only:
+        if not args.code_only and not wanted:
             print("\n[knowledge]")
             if not cfg.wiki_pages_dir or not cfg.wiki_pages_dir.is_dir():
                 print(f"  wiki pages directory not found: {cfg.wiki_pages_dir}"); rc = 1
@@ -277,10 +283,63 @@ def cmd_status(args) -> int:
     print(f"config: {st['config']}   offline: {st['offline']}")
     print(f"knowledge: {st['knowledge']['pages']} pages, {st['knowledge']['chunks']} chunks, "
           f"semantic vectors: {st['knowledge']['vectors']}")
+    cov = st["index_coverage"]
+    print(f"code index coverage: {cov['indexed']}/{cov['configured']} repos indexed "
+          "(unindexed repos are still searched by exact text and file name, without call graphs)")
     for r in st["repos"]:
         print(f"repo {r['repo']}: indexed={r['indexed']} freshness={r['freshness']} commit={(r['commit'] or '?')[:10]}")
+    if cov["not_indexed"]:
+        print("to index one repo: python -m kbw index --repo " + cov["not_indexed"][0])
     print(f"embedding model: {st['models']['embedding']['state']}  reranker: {st['models']['reranker']['state']}")
     print(f"running gateways: {[g['pid'] for g in st['running_gateways']] or 'none'}")
+    return 0
+
+
+def cmd_query(args) -> int:
+    """One search without an MCP client: for checking routing and results by hand."""
+    import asyncio
+
+    from .config import load_config
+    from .gateway import Gateway
+
+    cfg = load_config(args.config)
+
+    async def go() -> dict:
+        gw = Gateway(cfg)
+        try:
+            if args.kind == "code":
+                repos = [r.strip() for r in args.repos.split(",") if r.strip()] if args.repos else None
+                return await gw.search_code(args.text, repos, args.top_k)
+            if args.kind == "knowledge":
+                return await gw.search_knowledge(args.text, args.top_k)
+            return await gw.search_all(args.text, args.top_k)
+        finally:
+            await gw.close()
+
+    res = asyncio.run(go())
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
+        return 0
+    if "terms" in res:
+        print("terms:   " + (", ".join(f"{t['text']}({t['kind']})" for t in res["terms"]) or "(none)")
+              + f"   [{res['term_mode']}]")
+        for r in [r for r in res["routing"] if r["score"] > 0][:5]:
+            print(f"route:   {r['repo']}  score={r['score']:g}  {'; '.join(r['why'])}")
+        print("queried: " + (", ".join(f"{q['repo']}({q['sections']})" for q in res["repos_queried"]) or "(none)"))
+        cov = res["index_coverage"]
+        print(f"index:   {cov['indexed']}/{cov['configured']} repos indexed")
+    for d in res.get("degraded", []):
+        print("degraded: " + d)
+    if res.get("hint"):
+        print("hint:    " + res["hint"])
+    print(f"results: {len(res['results'])}")
+    for i, r in enumerate(res["results"], 1):
+        where = r.get("page") or f"{r['repo']}:{r['path']}"
+        lines = r.get("lines") or [None, None]
+        print(f"\n{i}. {where}  lines {lines[0]}-{lines[1]}  via {','.join(r.get('route_ranks', {})) or r.get('kind', '')}")
+        for line in (r.get("snippet") or "").splitlines()[:8]:
+            print("     " + line[:160])
+    print(f"\ncache hit: {res.get('cache', {}).get('hit')}   time: {res.get('cache', {}).get('ms')} ms")
     return 0
 
 
@@ -433,6 +492,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--rebuild", action="store_true", help="rebuild code indexes from scratch")
     s.add_argument("--code-only", action="store_true")
     s.add_argument("--knowledge-only", action="store_true")
+    s.add_argument("--repo", action="append", metavar="NAME",
+                   help="index only this configured repo (repeatable); skips the knowledge index")
     s.set_defaults(fn=cmd_index)
     s = sub.add_parser("serve", help="run the MCP gateway on stdio")
     s.add_argument("--log-level", default="INFO")
@@ -440,6 +501,13 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("status", help="show index, model and gateway state")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_status)
+    s = sub.add_parser("query", help="run one search from the terminal (same code path as the MCP tools)")
+    s.add_argument("kind", choices=["code", "knowledge", "all"])
+    s.add_argument("text")
+    s.add_argument("--repos", help="comma-separated repo names (code only)")
+    s.add_argument("--top-k", type=int, default=8)
+    s.add_argument("--json", action="store_true", help="print the full tool result")
+    s.set_defaults(fn=cmd_query)
     sub.add_parser("stop", help="stop gateway processes started from this config").set_defaults(fn=cmd_stop)
     sub.add_parser("doctor", help="check runtime, upstream programs, indexes, models and database").set_defaults(fn=cmd_doctor)
     args = ap.parse_args(argv)

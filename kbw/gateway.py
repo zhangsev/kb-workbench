@@ -115,5 +115,7 @@ class Gateway:
                               "sqlite_vec": {"loaded": self.store.vec_ok, "reason": self.store.vec_error}},
                 "models": {"embedding": self.embedder.status, "reranker": self.reranker.status},
                 "repos": repos,
+                "index_coverage": {"configured": len(repos), "indexed": sum(r["indexed"] for r in repos),
+                                   "not_indexed": [r["repo"] for r in repos if not r["indexed"]]},
                 "cache": {"entries": self.store.cache_size(), "hits": self.cache_hits, "misses": self.cache_misses},
                 "ripgrep": bool(self.code._rg)}

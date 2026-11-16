@@ -172,3 +172,70 @@ def test_routing_expansion_cross_service_cache(project):
         finally:
             await gw.close()
     asyncio.run(go())
+
+
+def test_chinese_filename_and_no_signal_queries(project):
+    """Regression for queries reported from real use: Chinese phrases returned
+    unrelated files, file names never matched, and 'no signal' picked arbitrary repos."""
+    src = project / "examples/repos/inventory-service/src/main/java/com/example/inventory"
+    (src / "BusinessSubarrayDelegate.java").write_text(
+        "package com.example.inventory;\n\n/**\n * 子阵概览：按子阵汇总设备状态。\n */\n"
+        "public class BusinessSubarrayDelegate {\n    public String subarrayView() {\n"
+        "        return \"ok\";\n    }\n}\n", encoding="utf-8")
+    res = project / "examples/repos/inventory-service/src/main/resources"
+    res.mkdir(parents=True)
+    (res / "rest-services-device-subarray-topology.yaml").write_text("swagger: '2.0'\ninfo:\n  title: device\n",
+                                                                  encoding="utf-8")
+
+    async def go():
+        gw = Gateway(load_config(str(project / "kbw.yaml")))
+        try:
+            for q in ("子阵概览 subarray overview", "子阵概览的接口在哪里实现", "子阵概览"):
+                r = await gw.search_code(q)
+                top = r["results"][0]
+                assert top["repo"] == "inventory-service" and top["path"].endswith("BusinessSubarrayDelegate.java"), q
+                assert "子阵概览" in top["matched_terms"] and r["term_mode"] == "phrases"
+                # context lines around the hit, not a single line
+                assert top["lines"][0] == 1 and top["lines"][1] >= 7 and "public class BusinessSubarrayDelegate" in top["snippet"]
+                assert r["routing"][0]["repo"] == "inventory-service" and not r["no_routing_signal"]
+
+            # the phrase carries extra words that are not in the code: fall back to pieces
+            r = await gw.search_code("子阵概览页面")
+            assert r["term_mode"] == "chinese_pieces"
+            assert r["results"][0]["path"].endswith("BusinessSubarrayDelegate.java")
+
+            # a term that only occurs in a file NAME
+            r = await gw.search_code("subarray-topology")
+            top = r["results"][0]
+            assert top["path"].endswith("rest-services-device-subarray-topology.yaml")
+            assert top["path_match"] == ["subarray-topology"] and "swagger" in top["snippet"]
+            assert any(k.startswith("filename:") for k in top["route_ranks"])
+
+            # nothing matches anywhere: empty, explicit, and no downstream is started to guess
+            r = await gw.search_code("完全不存在的业务词 zzzqqqxxx")
+            assert r["results"] == [] and r["no_routing_signal"] is True and r["repos_queried"] == []
+            assert "kbw.yaml" in r["hint"] and gw.codegraph.stats.starts == 0
+
+            # the caller may still force specific repos
+            r = await gw.search_code("完全不存在的业务词 zzzqqqxxx", repos=["order-service"])
+            assert [q["repo"] for q in r["repos_queried"]] == ["order-service"] and r["results"] == []
+
+            assert r["index_coverage"] == {"configured": 2, "indexed": 0,
+                                           "not_indexed": ["order-service", "inventory-service"]}
+            assert (await gw.status())["index_coverage"]["indexed"] == 0
+        finally:
+            await gw.close()
+    asyncio.run(go())
+
+
+def test_query_command(project):
+    import subprocess
+    env = dict(os.environ, KBW_CONFIG=str(project / "kbw.yaml"), PYTHONPATH=str(ROOT), PYTHONUTF8="1")
+    out = subprocess.run([sys.executable, "-m", "kbw", "query", "code", "StockService 预占"], env=env,
+                         capture_output=True, text=True, encoding="utf-8")
+    assert out.returncode == 0, out.stderr
+    assert "route:   inventory-service" in out.stdout and "StockService.java" in out.stdout
+    assert "index:   0/2 repos indexed" in out.stdout
+    out = subprocess.run([sys.executable, "-m", "kbw", "index", "--repo", "nope"], env=env,
+                         capture_output=True, text=True, encoding="utf-8")
+    assert out.returncode == 2 and "unknown repos" in out.stdout

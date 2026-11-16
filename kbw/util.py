@@ -143,6 +143,58 @@ def extract_symbols(query: str) -> list[dict]:
     return out
 
 
+_CJK_RUN = re.compile(rf"[{_CJK}]+")
+# Only unambiguous particles and question/filler words split a Chinese phrase.
+# Single-character prepositions are left alone because they also occur inside words.
+_CJK_SPLIT = re.compile(r"[的了吗呢吧啊]|在哪里|在哪儿|在哪个|在哪些|在哪|为什么|怎么样|怎么|如何|哪里|哪儿|哪个|哪些|什么|是否|请问|帮我|帮忙|一下|有没有")
+_CJK_STOP = {"实现", "代码", "逻辑", "功能", "接口", "方法", "服务", "流程", "位置", "地方", "相关", "处理",
+             "调用", "查询", "查找", "配置", "问题", "这个", "那个", "我们", "项目", "文件", "模块", "需要", "可以"}
+_WORD_RUN = re.compile(r"[A-Za-z][A-Za-z0-9]{3,}")
+_WORD_STOP = {"what", "where", "which", "when", "does", "this", "that", "with", "from", "into", "have", "find",
+              "show", "code", "file", "files", "class", "method", "function", "service", "interface", "impl",
+              "about", "there", "their", "should", "would", "could", "used", "using", "call", "calls", "called",
+              "implemented", "implementation", "logic", "handle", "handles", "return", "returns"}
+
+
+def extract_terms(query: str) -> list[dict]:
+    """Everything in a question worth an exact (fixed-string) search.
+
+    Code symbols first (see extract_symbols), then Chinese phrases and plain
+    words, so that a question written in natural language or copied from a
+    Chinese comment still reaches ripgrep instead of being dropped.
+    """
+    out = extract_symbols(query)
+    seen = {t["text"].casefold() for t in out}
+    covered = " ".join(t["text"] for t in out).casefold()
+    for run_ in _CJK_RUN.findall(query):
+        for seg in _CJK_SPLIT.split(run_):
+            if len(seg) >= 2 and seg not in _CJK_STOP and seg not in seen:
+                seen.add(seg)
+                out.append({"text": seg, "kind": "cjk"})
+    for w in _WORD_RUN.findall(query):
+        low = w.casefold()
+        if low in seen or low in _WORD_STOP or low in covered:
+            continue
+        seen.add(low)
+        out.append({"text": w, "kind": "word"})
+    return out
+
+
+def cjk_pieces(terms: list[dict]) -> list[dict]:
+    """Second-chance terms: two-character pieces of Chinese phrases, used only
+    when no whole phrase matched anywhere (e.g. the phrase carries extra words)."""
+    seen, out = set(), []
+    for t in terms:
+        if t["kind"] != "cjk" or len(t["text"]) < 3:
+            continue
+        for i in range(len(t["text"]) - 1):
+            piece = t["text"][i:i + 2]
+            if piece not in seen and piece not in _CJK_STOP:
+                seen.add(piece)
+                out.append({"text": piece, "kind": "cjk_piece"})
+    return out
+
+
 def rrf(ranked_lists: dict[str, list], k: int = 60) -> list[tuple[object, float, dict]]:
     """Reciprocal Rank Fusion. Raw scores of different sources are never compared;
     only ranks are used. Returns [(key, score, {source: rank})] best first."""
