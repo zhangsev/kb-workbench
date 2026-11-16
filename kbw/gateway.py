@@ -77,7 +77,10 @@ class Gateway:
 
     async def search_code(self, query: str, repos: list[str] | None = None, top_k: int | None = None) -> dict:
         k = top_k or self.cfg.top_k
-        version = await asyncio.to_thread(self.code.version)
+        # Only the repos this query can touch decide whether a cached answer is still valid;
+        # a single-repo query must not pay for git checks on every configured repo.
+        scoped = [r for r in self.cfg.repos if r.name in repos] if repos else None
+        version = await asyncio.to_thread(self.code.version, scoped)
         scope = {"q": " ".join(query.split()), "repos": sorted(repos or []), "k": k}
         return await self._cached("search_code", scope, version,
                                   lambda: self.code.search(query, repos, k, asyncio.to_thread))

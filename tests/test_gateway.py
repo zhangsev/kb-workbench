@@ -239,3 +239,56 @@ def test_query_command(project):
     out = subprocess.run([sys.executable, "-m", "kbw", "index", "--repo", "nope"], env=env,
                          capture_output=True, text=True, encoding="utf-8")
     assert out.returncode == 2 and "unknown repos" in out.stdout
+
+
+def test_encodings_definition_and_single_repo_cost(project, monkeypatch):
+    """Chinese in GBK files and in \\uXXXX-escaped .properties must be found;
+    a class query returns its defining file first with an outline; a query
+    scoped to one repo must not inspect the others."""
+    inv = project / "examples/repos/inventory-service"
+    (inv / "src/main/java/com/example/inventory/LegacyGbk.java").write_bytes(
+        "package com.example.inventory;\n// 逆变器告警屏蔽规则\npublic class LegacyGbk {}\n".encode("gbk"))
+    res = inv / "src/main/resources"
+    res.mkdir(parents=True, exist_ok=True)
+    escaped = "".join(f"\\u{ord(c):04X}" for c in "组串离散率")
+    (res / "messages_zh_CN.properties").write_text(f"string.dispersion={escaped}\n", encoding="ascii")
+
+    import kbw.code as code_mod
+    git_calls, rg_calls = [], []
+    real_git = code_mod.git_state
+    monkeypatch.setattr(code_mod, "git_state", lambda path: (git_calls.append(Path(path).name), real_git(path))[1])
+
+    async def go():
+        gw = Gateway(load_config(str(project / "kbw.yaml")))
+        real_pass = gw.code._rg_pass
+        gw.code._rg_pass = lambda repo, *a, **k: (rg_calls.append(repo.name), real_pass(repo, *a, **k))[1]
+        try:
+            r = await gw.search_code("逆变器告警屏蔽规则")
+            top = r["results"][0]
+            assert top["path"].endswith("LegacyGbk.java") and "逆变器告警屏蔽规则" in top["snippet"]  # decoded, readable
+
+            r = await gw.search_code("组串离散率")
+            assert r["results"][0]["path"].endswith("messages_zh_CN.properties")
+            assert r["results"][0]["matched_terms"] == ["组串离散率"]
+
+            r = await gw.search_code("StockService 是做什么的")
+            top = r["results"][0]
+            assert top["path"].endswith("StockService.java") and top["definition_of"] == "StockService"
+            assert "public class StockService" in top["outline"]
+            assert "public synchronized boolean reserve(String sku, int quantity)" in top["outline"]
+            assert any(k.startswith("definition:") for k in top["route_ranks"])
+
+            # scoped to one repo: no git check and no search in the other one, one content pass
+            git_calls.clear(); rg_calls.clear()
+            r = await gw.search_code("releaseStock", repos=["order-service"])
+            assert r["results"] and {x["repo"] for x in r["results"]} == {"order-service"}
+            assert set(git_calls) == {"order-service"} and rg_calls == ["order-service"]
+
+            # unscoped: each repo is searched once, not once for routing and again for results
+            rg_calls.clear()
+            await gw.search_code("reserveStock")
+            assert sorted(rg_calls) == ["inventory-service", "order-service"]
+            assert all("_hits" not in x for x in r["routing"])
+        finally:
+            await gw.close()
+    asyncio.run(go())

@@ -70,10 +70,11 @@ def build_server(cfg: Config) -> MCPServer:
         (Chinese phrases work). Exact text and file-name search covers every routed repository;
         call-graph results come only from indexed ones. If nothing in the query matches any
         repository, the result is empty with no_routing_signal=true and a hint, rather than
-        unrelated code. For a single known repository and a known identifier, a plain grep in
-        that repository is just as good; this tool is for finding which repository and for
-        cross-repository questions. Returns repo, commit, relative path, line range with
-        context, index freshness."""
+        unrelated code. When you already know the repository, pass repos=["name"]: only that
+        repository is checked and searched. Chinese is also found in GBK-encoded files and in
+        \\uXXXX-escaped .properties. A queried class name returns its defining file first with an
+        `outline` of its declarations and method signatures. Returns repo, commit, relative
+        path, line range with context, index freshness."""
         return await guarded(holder["gw"].search_code(query, repos, top_k))
 
     @server.tool()
