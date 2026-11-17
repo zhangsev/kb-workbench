@@ -76,7 +76,7 @@ Claude Code，项目根目录的 `.mcp.json`：
 
 Linux 下 `command` 为 `/opt/kb-workbench/.venv/bin/python`，`KBW_CONFIG` 为 `/opt/kb-workbench/kbw.yaml`。
 
-网关只读。需要让 Agent 写知识页面时，另外直接接 LLMWiki 自己的 MCP（它带写工具）：
+网关只读。需要让 Agent 写知识页面时，另外直接接 LLMWiki 自己的 MCP（它带写工具）。"分析完成后自动记录、同主题更新原页"的规则和页面模板见 [docs/KNOWLEDGE-RULES.md](docs/KNOWLEDGE-RULES.md)，写入链路可用 `python scripts/verify_wiki_write.py` 在副本上验证：
 
 ```json
 { "mcpServers": { "llmwiki": {
