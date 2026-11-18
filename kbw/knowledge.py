@@ -117,6 +117,21 @@ class Knowledge:
         fm = self.store.frontmatter(page) or {}
         root = self.cfg.wiki_pages_dir
         sources, missing = [], []
+        k = fm.get("kbw") if isinstance(fm.get("kbw"), dict) else None
+        if k is not None:  # page saved by save_knowledge: provenance is its source-code evidence
+            for e in k.get("evidence") or []:
+                sources.append({"evidence": e.get("id"), "repo": e.get("repo"), "path": e.get("path"),
+                                "symbol": e.get("symbol"), "lines": e.get("lines"), "commit": e.get("commit"),
+                                "branch": e.get("branch"), "dirty": e.get("dirty")})
+            if not sources:
+                missing.append("page has no source evidence")
+            no_commit = [e.get("id") for e in k.get("evidence") or [] if not e.get("commit")]
+            if no_commit:
+                missing.append(f"evidence without commit: {no_commit}")
+            updated = fm.get("updated")
+            return {"page": page, "page_id": k.get("id"), "type": fm.get("type"), "kind": k.get("kind"),
+                    "services": k.get("services") or [], "sources": sources,
+                    "updated": str(updated) if updated else None, "missing": missing}
         listed = fm.get("sources") if isinstance(fm.get("sources"), list) else []
         own = fm.get("source_path")
         if own:
@@ -141,7 +156,7 @@ class Knowledge:
 
     # ------------------------------------------------------------ search
 
-    async def search(self, query: str, top_k: int, to_thread) -> dict:
+    async def search(self, query: str, top_k: int, to_thread, service: str | None = None) -> dict:
         degraded, routes, timings = [], {}, {}
         await to_thread(self.sync)
         chunk_of: dict[str, dict] = {}
@@ -189,7 +204,21 @@ class Knowledge:
             degraded.append(f"wiki_query: {exc}")
         timings["wiki_query_ms"] = round((time.perf_counter() - t) * 1000, 1)
 
-        fused = rrf(routes, self.cfg.rrf_k)
+        # navigation pages (index, log, generated hubs) are not answers
+        nav = lambda p: p in ("index.md", "log.md") or p.startswith("hubs/")
+        fused = [x for x in rrf(routes, self.cfg.rrf_k) if not nav(x[0])]
+        if service:
+            want = service.casefold()
+
+            def about(page: str) -> bool:
+                fm = self.store.frontmatter(page) or {}
+                k = fm.get("kbw") if isinstance(fm.get("kbw"), dict) else None
+                if k is not None:
+                    return want in {s.casefold() for s in k.get("services") or []}
+                text = " ".join([str(fm.get("title") or ""), " ".join(map(str, fm.get("tags") or [])),
+                                 (chunk_of.get(page) or {}).get("text") or ""]).casefold()
+                return want in text
+            fused = [x for x in fused if about(x[0])]
         pool = fused[:max(top_k * 3, top_k)]
         reranked = False
         if self.cfg.rerank_enabled and pool:
@@ -202,11 +231,13 @@ class Knowledge:
         results = []
         for page, score, ranks in pool[:top_k]:
             c = chunk_of[page]
-            results.append({"page": page, "title": c.get("title"), "heading": c.get("heading"),
+            prov = self.provenance(page)
+            results.append({"page": page, "page_id": prov.get("page_id"), "kind": prov.get("kind"),
+                            "services": prov.get("services"), "title": c.get("title"), "heading": c.get("heading"),
                             "lines": [c.get("start_line"), c.get("end_line")],
                             "snippet": (c.get("text") or "")[:500], "rrf_score": round(score, 5),
-                            "route_ranks": ranks, "provenance": self.provenance(page)})
-        return {"query": query, "results": results, "fusion": f"RRF(k={self.cfg.rrf_k}) by page",
+                            "route_ranks": ranks, "provenance": prov})
+        return {"query": query, "service": service, "results": results, "fusion": f"RRF(k={self.cfg.rrf_k}) by page",
                 "routes_used": [r for r, v in routes.items() if v], "reranked": reranked,
                 "degraded": degraded, "timings": timings}
 

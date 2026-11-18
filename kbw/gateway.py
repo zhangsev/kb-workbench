@@ -10,6 +10,7 @@ from .config import LLMWIKI_READ_TOOLS, UPSTREAM, Config, downstream_env
 from .downstream import ManagedSession
 from .embed import Embedder, Reranker
 from .knowledge import Knowledge
+from .notes import Notes
 from .store import Store
 from .util import resolve_command, rrf, sha
 
@@ -40,6 +41,7 @@ class Gateway:
                                   required_tools=["codegraph_explore"], allowed_tools=["codegraph_explore"])
         self.knowledge = Knowledge(cfg, self.store, self.embedder, self.reranker, self.wiki)
         self.code = Code(cfg, self.store, self.codegraph)
+        self.notes = Notes(cfg, self.knowledge)
         self.started = time.time()
         self.cache_hits = self.cache_misses = 0
 
@@ -69,11 +71,30 @@ class Gateway:
         return {"pages": self.knowledge.version(), "vectors": self.store.get_meta("vec"),
                 "rerank": self.cfg.rerank_enabled}
 
-    async def search_knowledge(self, query: str, top_k: int | None = None) -> dict:
+    async def search_knowledge(self, query: str, top_k: int | None = None, service: str | None = None) -> dict:
         k = top_k or self.cfg.top_k
         version = await asyncio.to_thread(self._knowledge_version)
-        return await self._cached("search_knowledge", {"q": " ".join(query.split()), "k": k}, version,
-                                  lambda: self.knowledge.search(query, k, asyncio.to_thread))
+        return await self._cached("search_knowledge", {"q": " ".join(query.split()), "k": k, "service": service},
+                                  version, lambda: self.knowledge.search(query, k, asyncio.to_thread, service))
+
+    async def read_page(self, ref: str) -> dict:
+        """Read by page id or path; ids and old paths of moved or merged pages resolve."""
+        path, redirected = await asyncio.to_thread(self.notes.resolve, ref)
+        res = await self.knowledge.read_page(path, asyncio.to_thread)
+        res["redirected_from"] = redirected or (ref if ref.replace("\\", "/").removeprefix("wiki/") != path else None)
+        full = self.cfg.wiki_pages_dir / path
+        from .notes import _version, split_page
+        raw = await asyncio.to_thread(full.read_bytes)
+        res["version"] = _version(raw)
+        fm, _ = split_page(raw.decode("utf-8", errors="replace"))
+        k = fm.get("kbw") if isinstance(fm.get("kbw"), dict) else None
+        if k is not None:
+            res["page_id"] = k.get("id")
+            res["knowledge"] = {x: k.get(x) for x in ("kind", "services", "keywords", "summary", "questions",
+                                                      "facts", "designs", "inferences", "open_questions",
+                                                      "evidence", "related", "project")}
+            res["source_check"] = await asyncio.to_thread(self.notes.source_check, k)
+        return res
 
     async def search_code(self, query: str, repos: list[str] | None = None, top_k: int | None = None) -> dict:
         k = top_k or self.cfg.top_k
@@ -101,7 +122,8 @@ class Gateway:
                 keys.append(key)
                 lookup[key] = r
             lists[label] = keys
-        merged = [{"kind": key[0], "rrf_score": round(score, 5), **lookup[key]}
+        merged = [{**lookup[key], "kind": key[0], "page_kind": lookup[key].get("kind") if key[0] == "knowledge" else None,
+                   "rrf_score": round(score, 5)}
                   for key, score, _ in rrf(lists, self.cfg.rrf_k)[:k * 2]]
         return {"query": query, "results": merged, "degraded": degraded,
                 "fusion": "RRF over the knowledge ranking and the code ranking (ranks only, raw scores are not compared)",
@@ -121,4 +143,5 @@ class Gateway:
                 "index_coverage": {"configured": len(repos), "indexed": sum(r["indexed"] for r in repos),
                                    "not_indexed": [r["repo"] for r in repos if not r["indexed"]]},
                 "cache": {"entries": self.store.cache_size(), "hits": self.cache_hits, "misses": self.cache_misses},
+                "knowledge_writes": {"enabled": self.cfg.knowledge_writable, "pending_reindex": self.notes.pending()},
                 "ripgrep": bool(self.code._rg)}

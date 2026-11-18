@@ -11,6 +11,10 @@ knowledge:
   # read_source may read ONLY inside these directories.
   source_dirs:
     - D:/knowledge/.wiki/raw
+  # save_knowledge / organize_knowledge / check_knowledge(fix) write only under <wiki_root>/wiki.
+  writable: true
+  # Optional project name recorded on saved pages.
+  # project: my-project
 
 models:
   dir: models                         # FastEmbed model cache; copy this directory for offline use

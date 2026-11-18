@@ -1,6 +1,6 @@
 # kb-workbench：本地知识与代码检索工作台
 
-一个只读的 MCP 网关。Codex / Claude Code 只接它一个 MCP，就能同时检索知识页面和多个 Java 仓库的源码。
+一个 MCP 网关。Codex / Claude Code 只接它一个 MCP，就能同时检索知识页面和多个 Java 仓库的源码，并把分析结论沉淀为可复用的知识页。对源码仓库和原始材料只读；知识写入只发生在 wiki 的 `wiki/` 目录。
 
 - 知识库下游：[microsoft/llmwiki](https://github.com/microsoft/llmwiki) 的 `@llmwiki/core`（stdio MCP，`llmwiki-mcp`）
 - 代码下游：[colbymchenry/codegraph](https://github.com/colbymchenry/codegraph)（stdio MCP，`codegraph serve --mcp`）
@@ -34,6 +34,7 @@ LLMWiki 不从 npm 安装（包返回 E404）。setup 将仓库克隆到 `vendor
 | `serve` | 以 stdio 方式运行 MCP 网关。日志全部写 stderr，stdout 只有 MCP 协议 | 否 |
 | `status` | 配置、知识索引、代码索引覆盖率（已索引 X/Y 个仓库）、各仓库索引与新鲜度、模型、正在运行的网关进程；`--json` 输出完整信息 | 否 |
 | `query code\|knowledge\|all "问题"` | 在终端直接跑一次检索，打印提取的检索词、路由得分、实际查询的仓库和结果；`--repos a,b` 限定仓库，`--json` 输出完整结果。和 MCP 工具走同一段代码，用来排查"为什么搜不到" | 否 |
+| `check-knowledge [--fix]` | 知识库健康检查，`--fix` 只修复移动后的链接、索引条目和导航页 | 否 |
 | `stop` | 停止由本配置启动的网关进程（核对命令行后才终止，不动 CodeGraph 自己的共享 daemon） | 否 |
 | `doctor` | 检查运行时、上游程序、仓库索引、模型、数据库；失败项附修复命令 | 否 |
 
@@ -76,7 +77,7 @@ Claude Code，项目根目录的 `.mcp.json`：
 
 Linux 下 `command` 为 `/opt/kb-workbench/.venv/bin/python`，`KBW_CONFIG` 为 `/opt/kb-workbench/kbw.yaml`。
 
-网关只读。需要让 Agent 写知识页面时，另外直接接 LLMWiki 自己的 MCP（它带写工具）。"分析完成后自动记录、同主题更新原页"的规则和页面模板见 [docs/KNOWLEDGE-RULES.md](docs/KNOWLEDGE-RULES.md)，写入链路可用 `python scripts/verify_wiki_write.py` 在副本上验证：
+知识保存由网关的 `save_knowledge` 等工具完成，只写 wiki 的 `wiki/` 目录，从不修改源码仓库和 `raw/`。工具说明和 Agent 自动记录规则见 [docs/KNOWLEDGE-RULES.md](docs/KNOWLEDGE-RULES.md)，真实验证用 `python scripts/verify_knowledge_save.py`。不需要额外接 LLMWiki 的 MCP；如果确实要用 LLMWiki 自带的写工具（例如手工维护非受管页面，`python scripts/verify_wiki_write.py` 可验证这条链路），配置如下：
 
 ```json
 { "mcpServers": { "llmwiki": {
@@ -94,6 +95,11 @@ Linux 下 `command` 为 `/opt/kb-workbench/.venv/bin/python`，`KBW_CONFIG` 为 
 | `read_source(path, start_line, max_lines)` | 读取原始材料，只能读 `source_dirs` 内的文件 |
 | `search_code(query, repos, top_k)` | 路由到候选仓库，查 CodeGraph，同时做内容和文件名的精确搜索，必要时扩查。没有任何仓库匹配时返回空结果和 `no_routing_signal` |
 | `search_all(query, top_k)` | 知识与代码一起查，两个排名再做一次 RRF |
+| `find_knowledge(title, services, keywords, evidence_paths, question)` | 保存前查找同主题页面，只给候选和理由 |
+| `save_knowledge(...)` | 新建或更新知识页：校验字段与路径、合并去重、版本冲突检测、原子写入、更新 `index.md` 和服务导航，返回页面 ID、路径、状态和索引状态 |
+| `organize_knowledge(action, page, ...)` | 移动或合并页面，先预览再执行；旧 ID 和旧路径继续可读 |
+| `check_knowledge(fix)` | 重复候选、断链、孤立页、缺少来源、来源已变化等检查；`fix` 只做机械修复 |
+| `reindex_knowledge()` | 保存后索引失败时重试 |
 | `service_status()` | 下游连接、各仓库索引状态、模型、缓存、降级原因 |
 
 每个结果都带 `degraded` 列表，说明哪一路检索不可用以及原因。
@@ -136,7 +142,7 @@ Linux 下 `command` 为 `/opt/kb-workbench/.venv/bin/python`，`KBW_CONFIG` 为 
 - 长连接复用；每次调用有超时；超时或连接断开后丢弃连接，下次调用自动重连（连接断开时当次调用自动重试一次）。
 - 空闲 `idle_seconds` 后释放。
 - 关闭时只终止自己启动的子进程。CodeGraph 自行拉起的共享 daemon 不由网关管理，交给它自己的空闲超时。
-- LLMWiki 只放行 6 个读工具，写工具在网关侧直接拒绝。
+- 网关不转发 LLMWiki 的写工具（只放行 6 个读工具）；知识写入由网关自己的 `save_knowledge` 等工具完成，使用与 LLMWiki 相同的写锁和文件格式。
 - 启动 CodeGraph 时设置 `DO_NOT_TRACK=1`、`CODEGRAPH_TELEMETRY=0`、`CODEGRAPH_NO_UPDATE_CHECK=1`，关闭其匿名统计和更新检查；npm 1.6.2 不接受 `--no-telemetry`。另设 `CODEGRAPH_NO_DOWNLOAD=1` 禁止运行时隐式下载。
 
 ## 10. 对源码仓库的写入

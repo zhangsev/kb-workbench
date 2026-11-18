@@ -45,6 +45,8 @@ class Config:
     idle_timeout: float
     llmwiki: dict
     codegraph: dict
+    knowledge_writable: bool = True
+    knowledge_project: str | None = None
 
     @property
     def wiki_pages_dir(self) -> Path | None:
@@ -141,6 +143,7 @@ def load_config(explicit: str | None = None) -> Config:
         start_timeout=float(timeouts.get("start_seconds", 30)),
         idle_timeout=float(timeouts.get("idle_seconds", 300)),
         llmwiki=down.get("llmwiki") or {}, codegraph=down.get("codegraph") or {},
+        knowledge_writable=bool(kn.get("writable", True)), knowledge_project=kn.get("project"),
     )
 
 

@@ -75,8 +75,9 @@ def test_end_to_end_over_mcp_degraded(project):
             async with ClientSession(r, w) as s:
                 await s.initialize()
                 names = sorted(t.name for t in (await s.list_tools()).tools)
-                assert names == ["read_page", "read_source", "search_all", "search_code", "search_knowledge",
-                                 "service_status"]
+                assert names == ["check_knowledge", "find_knowledge", "organize_knowledge", "read_page", "read_source",
+                                 "reindex_knowledge", "save_knowledge", "search_all", "search_code",
+                                 "search_knowledge", "service_status"]
 
                 async def call(tool, **args):
                     res = await s.call_tool(tool, args)

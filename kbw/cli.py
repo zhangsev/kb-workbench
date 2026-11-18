@@ -343,6 +343,21 @@ def cmd_query(args) -> int:
     return 0
 
 
+def cmd_check_knowledge(args) -> int:
+    import asyncio
+
+    from .config import load_config
+    from .gateway import Gateway
+
+    gw = Gateway(load_config(args.config))
+    try:
+        rep = gw.notes.check(fix=args.fix)
+    finally:
+        asyncio.run(gw.close())
+    print(json.dumps(rep, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
 def cmd_stop(args) -> int:
     from .config import load_config
 
@@ -508,6 +523,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--top-k", type=int, default=8)
     s.add_argument("--json", action="store_true", help="print the full tool result")
     s.set_defaults(fn=cmd_query)
+    s = sub.add_parser("check-knowledge", help="knowledge health check (duplicates, broken links, stale sources)")
+    s.add_argument("--fix", action="store_true", help="apply mechanical repairs: links to moved pages, index, hubs")
+    s.set_defaults(fn=cmd_check_knowledge)
     sub.add_parser("stop", help="stop gateway processes started from this config").set_defaults(fn=cmd_stop)
     sub.add_parser("doctor", help="check runtime, upstream programs, indexes, models and database").set_defaults(fn=cmd_doctor)
     args = ap.parse_args(argv)
